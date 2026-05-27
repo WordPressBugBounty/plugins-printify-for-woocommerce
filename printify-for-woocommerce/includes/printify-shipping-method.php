@@ -9,7 +9,10 @@ class Printify_Shipping_Method extends WC_Shipping_Method
 
     const DEFAULT_ENABLED = self::WOO_TRUE;
     const DEFAULT_OVERRIDE = self::WOO_TRUE;
-    const VERSION = '3.0';
+    const VERSION = '3.2';
+
+    const CACHE_TTL_SECONDS       = 900; // 15 min for valid rates
+    const CACHE_TTL_EMPTY_SECONDS = 60;  // 1 min for null / partial-address responses
 
     private $shipping_enabled;
     private $shipping_override;
@@ -96,6 +99,17 @@ class Printify_Shipping_Method extends WC_Shipping_Method
         }
     }
 
+    private function build_cache_key(array $skus, array $address): string
+    {
+        $items = [];
+        foreach ($skus as $sku => $data) {
+            $items[$sku] = $data['quantity'];
+        }
+        ksort($items);
+
+        return 'printify_shipping_' . md5(json_encode(['items' => $items, 'address' => $address]));
+    }
+
     public function calculate_shipping_rates($packages = [])
     {
         if ($this->shipping_enabled !== self::WOO_TRUE) {
@@ -143,16 +157,25 @@ class Printify_Shipping_Method extends WC_Shipping_Method
             return $packages;
         }
 
+        $cacheKey = $this->build_cache_key($requestParameters['skus'], $requestParameters['address']);
+        $printifyShippingRates = get_transient($cacheKey);
 
-        // Collect shipping rates for found skus
-        $printifyShippingRates = $this->printifyApiClient->get_shipping_rates(
-            [
-                'items' => $requestParameters['skus'],
-                'country' => $requestParameters['address']['country'],
-                'state' => $requestParameters['address']['state'],
-                'zip' => isset($requestParameters['address']['postcode']) ? $requestParameters['address']['postcode'] : null,
-            ]
-        );
+        if (false === $printifyShippingRates) {
+            $printifyShippingRates = $this->printifyApiClient->get_shipping_rates(
+                [
+                    'items' => $requestParameters['skus'],
+                    'country' => $requestParameters['address']['country'],
+                    'state' => $requestParameters['address']['state'],
+                    'zip' => isset($requestParameters['address']['zip']) ? $requestParameters['address']['zip'] : null,
+                ]
+            );
+
+            $ttl = (null === $printifyShippingRates || empty($printifyShippingRates['skus']))
+                ? self::CACHE_TTL_EMPTY_SECONDS
+                : self::CACHE_TTL_SECONDS;
+
+            set_transient($cacheKey, $printifyShippingRates, $ttl);
+        }
 
         if (null === $printifyShippingRates || empty($printifyShippingRates['skus'])) {
             return $packages;
